@@ -1,3 +1,8 @@
+import multiprocessing as mp
+
+if __name__ == "__main__":
+    mp.set_start_method("fork", force=True)
+
 from configparser import ConfigParser
 from argparse import ArgumentParser
 
