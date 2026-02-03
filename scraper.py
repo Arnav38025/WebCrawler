@@ -91,7 +91,7 @@ def _tokenize_helper(text: str):
 
 def tokenize_html(resp):
     try:
-        bs_parser = BeautifulSoup(resp.raw_response.content, 'html')
+        bs_parser = BeautifulSoup(resp.raw_response.content, features='html.parser')
         tokens = _tokenize_helper(bs_parser.get_text())
     except AttributeError:
         return []
@@ -103,6 +103,7 @@ def _count_tokens(token_list):
             common_words[token] += 1
 
 def _longest_page_check(url, page_length):
+    global longest_page
     if page_length > longest_page[1]:
         longest_page = (url, page_length)
 
@@ -118,13 +119,12 @@ def extract_next_links(url, resp):
 
     visited_urls.add(url)    
 
-    soup = BeautifulSoup(resp.raw_response.content, 'html')
+    soup = BeautifulSoup(resp.raw_response.content, features='html.parser')
     print('soup parser initialized')
 
 
     anchors = soup.find_all('a')
     for anchor in anchors:
-        print(f'Anchor: {anchor}')
         href = anchor.get('href')
         if href:
             parsed = urlparse(url)
@@ -132,11 +132,11 @@ def extract_next_links(url, resp):
                 href = urljoin(url, href)
             
         #delete fragment from url
-        href = href.split('#')[0]
+            href = href.split('#')[0]
 
 
-        if is_valid(href):
-            next_links.add(href)
+            if is_valid(href):
+                next_links.add(href)
     print('found all anchor links')
     return next_links
 
@@ -159,8 +159,25 @@ def is_valid(url):
     # There are already some conditions that return False.
     try:
         parsed = urlparse(url)
+
         if parsed.scheme not in set(["http", "https"]):
             return False
+        
+        netloc = parsed.netloc
+        failed_conditions = 0
+
+        if '.ics.uci.edu' not in netloc:
+            failed_conditions += 1
+        if '.cs.uci.edu' not in netloc:
+            failed_conditions += 1
+        if '.informations.uci.edu' not in netloc:
+            failed_conditions += 1
+        if '.stat.uci.edu' not in netloc:
+            failed_conditions += 1
+        
+        if failed_conditions == 4:
+            return False
+
         return not re.match(
             r".*\.(css|js|bmp|gif|jpe?g|ico"
             + r"|png|tiff?|mid|mp2|mp3|mp4"
