@@ -1,5 +1,5 @@
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 from collections import defaultdict
 
@@ -36,8 +36,19 @@ stopwords = {
 
 
 def scraper(url, resp):
+    print('init scraper')
     links = extract_next_links(url, resp)
-    return [link for link in links if is_valid(link)]
+    valid_links = [link for link in links if is_valid(link)]
+
+    ##for this page -> tokenize, check if the longest page tuple needs to update, update common_words_freq
+    if resp.status == 200:
+        if url not in blacklist_urls:
+            token_list = tokenize_html(resp)
+            _longest_page_check(url, len(token_list))
+            _count_tokens(token_list)
+
+    return valid_links
+
 
 def extract_subdomain(url):
     '''
@@ -56,8 +67,6 @@ def extract_subdomain(url):
     
     full_url = f'http://{subdomain}.{domain}.uci.edu'
     subdomain_freqs[full_url] += 1
-    
-
 
 
 def _tokenize_helper(text: str):
@@ -99,12 +108,37 @@ def _longest_page_check(url, page_length):
 
 
 def extract_next_links(url, resp):
-    next_links = []
+    next_links = set()
     if resp.status != 200 or url in blacklist_urls or url in visited_urls:
         blacklist_urls.add(url)
         return []
+    
+    print('just finished response validity check')
+    extract_subdomain(url) ##get subdomain urls dict updated
 
     visited_urls.add(url)    
+
+    soup = BeautifulSoup(resp.raw_response.content, 'html')
+    print('soup parser initialized')
+
+
+    anchors = soup.find_all('a')
+    for anchor in anchors:
+        print(f'Anchor: {anchor}')
+        href = anchor.get('href')
+        if href:
+            parsed = urlparse(url)
+            if parsed.scheme:
+                href = urljoin(url, href)
+            
+        #delete fragment from url
+        href = href.split('#')[0]
+
+
+        if is_valid(href):
+            next_links.add(href)
+    print('found all anchor links')
+    return next_links
 
     print(f'URL: {resp.raw_response.url}')
     print(f'Content: {resp.raw_response.content}')
@@ -133,10 +167,9 @@ def is_valid(url):
             + r"|wav|avi|mov|mpeg|ram|m4v|mkv|ogg|ogv|pdf"
             + r"|ps|eps|tex|ppt|pptx|doc|docx|xls|xlsx|names"
             + r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
-            + r"|epub|dll|cnf|tgz|sha1"
+            + r"|epub|dll|cnf|tgz|sha1|txt"
             + r"|thmx|mso|arff|rtf|jar|csv"
             + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", parsed.path.lower())
-
     except TypeError:
         print ("TypeError for ", parsed)
         raise
