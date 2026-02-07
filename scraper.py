@@ -2,13 +2,15 @@ import re
 from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 from collections import defaultdict
-
+from urllib.robotparser import RobotFileParser
+from time import sleep
 
 longest_page = ('Temp', -1)
 common_words = defaultdict(int)
 subdomain_freqs = defaultdict(int)
 blacklist_urls = set()
 visited_urls = set()
+robot_parse_links = dict()
 stopwords = {
     "a", "about", "above", "after", "again", "against", "all", "am", "an",
     "and", "any", "are", "aren't", "as", "at", "be", "because", "been",
@@ -46,7 +48,8 @@ def scraper(url, resp):
             token_list = tokenize_html(resp)
             _longest_page_check(url, len(token_list))
             _count_tokens(token_list)
-
+        
+        print_report()
     return valid_links
 
 
@@ -65,9 +68,17 @@ def extract_subdomain(url):
     if subdomain == 'www':
         return
     
-    full_url = f'http://{subdomain}.{domain}.uci.edu'
+    full_url = f'{subdomain}.{domain}.uci.edu'
     subdomain_freqs[full_url] += 1
 
+def long_enough_page(resp):
+    '''
+    Checks if page is long enough to scrape(small pages should be skipped)
+    '''
+    tokens = tokenize_html(resp)
+    if len(tokens) <= 300:
+        return False
+    return True
 
 def _tokenize_helper(text: str):
     '''
@@ -90,6 +101,9 @@ def _tokenize_helper(text: str):
     return token_list
 
 def tokenize_html(resp):
+    '''
+    Tokenizes the html response
+    '''
     try:
         bs_parser = BeautifulSoup(resp.raw_response.content, features='html.parser')
         tokens = _tokenize_helper(bs_parser.get_text())
@@ -122,7 +136,12 @@ def extract_next_links(url, resp):
     soup = BeautifulSoup(resp.raw_response.content, features='html.parser')
     print('soup parser initialized')
 
+    #check if page has enough content
+    if not long_enough_page(resp):
+        blacklist_urls.add(url)
+        return []
 
+    #find all links, if href tags point to something, add them
     anchors = soup.find_all('a')
     for anchor in anchors:
         href = anchor.get('href')
@@ -153,6 +172,40 @@ def extract_next_links(url, resp):
     # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
     return list()
 
+def print_report():
+    '''
+    Saves crawler data to report .txt file
+    '''
+    with open ("crawlerReport.txt", 'w') as report:
+        report.write(f"Unique Pages:  {len(visited_urls)}\n\n\n")
+        report.write(f"Longest Page:  {longest_page[0]} is {longest_page[1]} characters long\n\n\n")
+        report.write(f"Top 50 most frequency words: \n")
+        top50_common_words = sorted(common_words.items(), key=lambda item: item[1], reverse=True)
+        for i in range(len(common_words)):
+            report.write(f"{top50_common_words.values(i)} with frequncy {top50_common_words.keys(i)}")
+        report.write("\n\n\n")
+        report.write(f"Unique Pages: ")
+        for i in range(len(subdomain_freqs.items())):
+            report.write(f"{subdomain_freqs.values(i)}, {subdomain_freqs.keys(i)}\n")
+
+def robot_check(url): 
+    try:   
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    robots_link = f'{parsed.scheme}://{parsed.netloc}/robots.txt'
+    if robots_link not in robot_parse_links:
+        sleep(0.5) #politeness
+        try:
+            rp = RobotFileParser()
+            rp.set_url(robots_link)
+            rp.read()
+            robot_parse_links[robots_link] = rp
+        except Exception:
+            return False
+
+    return robot_parse_links[robots_link].can_fetch("*", url)
+    
 def is_valid(url):
     # Decide whether to crawl this url or not. 
     # If you decide to crawl it, return True; otherwise return False.
@@ -164,6 +217,7 @@ def is_valid(url):
             return False
         
         netloc = parsed.netloc
+        path = parsed.path
         failed_conditions = 0
 
         if '.ics.uci.edu' not in netloc:
@@ -178,6 +232,14 @@ def is_valid(url):
         if failed_conditions == 4:
             return False
 
+        ##ban common url traps with regex -> calendar traps, repeating directory traps
+        #https://support.archive-it.org/hc/en-us/articles/208332963-Modify-crawl-scope-with-a-Regular-Expression#InvalidURLs
+
+        if re.match(r"^.*calendar.*$", path):
+            return False
+        if re.match(r" ^.*?(/.+?/).*?\1.*$|^.*?/(.+?/)\2.*$", path):
+            return False
+        
         return not re.match(
             r".*\.(css|js|bmp|gif|jpe?g|ico"
             + r"|png|tiff?|mid|mp2|mp3|mp4"
