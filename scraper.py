@@ -1,8 +1,8 @@
 import re
+from hashlib import md5
 from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 from collections import defaultdict
-from urllib.robotparser import RobotFileParser
 from time import sleep
 
 longest_page = ('Temp', -1)
@@ -11,6 +11,7 @@ subdomain_freqs = defaultdict(int)
 blacklist_urls = set()
 visited_urls = set()
 robot_parse_links = dict()
+seen_content_hashes = set()
 stopwords = {
     "a", "about", "above", "after", "again", "against", "all", "am", "an",
     "and", "any", "are", "aren't", "as", "at", "be", "because", "been",
@@ -38,37 +39,65 @@ stopwords = {
 
 
 def scraper(url, resp):
-    print('init scraper')
+    if resp.status == 200:
+        if is_exact_duplicate(resp):
+            blacklist_urls.add(url)
+            return []
+        
     links = extract_next_links(url, resp)
     valid_links = [link for link in links if is_valid(link)]
 
     ##for this page -> tokenize, check if the longest page tuple needs to update, update common_words_freq
-    if resp.status == 200:
-        if url not in blacklist_urls:
-            token_list = tokenize_html(resp)
-            _longest_page_check(url, len(token_list))
-            _count_tokens(token_list)
+    if resp.status == 200 and url not in blacklist_urls:
+        token_list = tokenize_html(resp)
+        _longest_page_check(url, len(token_list))
+        _count_tokens(token_list)
         
         print_report()
     return valid_links
 
-
+def is_exact_duplicate(resp):
+    """
+    Check if page is exact duplicate
+    """
+    try:
+        soup = BeautifulSoup(resp.raw_response.content, 'html.parser')
+        
+        for tag in soup(['script', 'style', 'nav', 'header', 'footer']):
+            tag.decompose()
+        
+        text = soup.get_text()
+        
+        text = ' '.join(text.split())
+        
+        content_hash = md5(text.encode('utf-8')).hexdigest()
+        
+        if content_hash in seen_content_hashes:
+            return True
+        
+        seen_content_hashes.add(content_hash)
+        return False
+        
+    except Exception as e:
+        print(f"Error checking duplicate: {e}")
+        return False
+    
 def extract_subdomain(url):
     '''
     Used to extract subdomains from urls to count how much each subdomain has been visited
     '''
-    subdomain_pattern = r'https?://([^/]+)\.(ics|cs|informatics|stat)\.uci\.edu'
+    subdomain_pattern = r'https?://([^/]+)\.uci\.edu'
     match = re.search(subdomain_pattern, url)
     if not match:
         return
     
     subdomain = match.group(1).lower()
-    domain = match.group(2)
+    # domain = match.group(2)
 
     if subdomain == 'www':
         return
     
-    full_url = f'{subdomain}.{domain}.uci.edu'
+    full_url = f'{subdomain}.uci.edu'
     subdomain_freqs[full_url] += 1
 
 def long_enough_page(resp):
@@ -76,7 +105,7 @@ def long_enough_page(resp):
     Checks if page is long enough to scrape(small pages should be skipped)
     '''
     tokens = tokenize_html(resp)
-    if len(tokens) <= 300:
+    if len(tokens) <= 200:
         return False
     return True
 
@@ -124,22 +153,32 @@ def _longest_page_check(url, page_length):
 
 def extract_next_links(url, resp):
     next_links = set()
-    if resp.status != 200 or url in blacklist_urls or url in visited_urls:
+    if resp.status != 200 or url in blacklist_urls:
         blacklist_urls.add(url)
         return []
     
-    print('just finished response validity check')
+    if url in visited_urls:
+        return []
+    
     extract_subdomain(url) ##get subdomain urls dict updated
 
-    visited_urls.add(url)    
+    visited_urls.add(url)  
 
-    soup = BeautifulSoup(resp.raw_response.content, features='html.parser')
-    print('soup parser initialized')
+    parsed = urlparse(url)
+    path = parsed.path 
+    
+    #links to uploaded documents/downloads, not crawlable content
+    if "/files/" in path or "/sampledata/" in path:
+        blacklist_urls.add(url)
+        return []
+
 
     #check if page has enough content
     if not long_enough_page(resp):
         blacklist_urls.add(url)
         return []
+    
+    soup = BeautifulSoup(resp.raw_response.content, features='html.parser')
 
     #find all links, if href tags point to something, add them
     anchors = soup.find_all('a')
@@ -152,15 +191,14 @@ def extract_next_links(url, resp):
             
         #delete fragment from url
             href = href.split('#')[0]
+            if "archive" in href:
+                href = href.split("?")[0]
 
 
             if is_valid(href):
                 next_links.add(href)
-    print('found all anchor links')
     return next_links
 
-    print(f'URL: {resp.raw_response.url}')
-    print(f'Content: {resp.raw_response.content}')
     # Implementation required.
     # url: the URL that was used to get the page
     # resp.url: the actual url of the page
@@ -170,7 +208,6 @@ def extract_next_links(url, resp):
     #         resp.raw_response.url: the url, again
     #         resp.raw_response.content: the content of the page!
     # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
-    return list()
 
 def print_report():
     '''
@@ -178,58 +215,93 @@ def print_report():
     '''
     with open ("crawlerReport.txt", 'w') as report:
         report.write(f"Unique Pages:  {len(visited_urls)}\n\n\n")
-        report.write(f"Longest Page:  {longest_page[0]} is {longest_page[1]} characters long\n\n\n")
-        report.write(f"Top 50 most frequency words: \n")
-        top50_common_words = sorted(common_words.items(), key=lambda item: item[1], reverse=True)
-        for i in range(len(common_words)):
-            report.write(f"{top50_common_words.values(i)} with frequncy {top50_common_words.keys(i)}")
+
+        report.write(f"Longest Page:  {longest_page[0]} is {longest_page[1]} tokens long\n\n\n")
+
+        report.write(f"Top 50 most frequent words: \n")
+        top50_common_words = sorted(
+            common_words.items(),
+            key=lambda item: item[1],
+            reverse=True
+        )[:50]
+
+        for word, freq in top50_common_words:
+            report.write(f"{word}: {freq}\n")
+        
         report.write("\n\n\n")
-        report.write(f"Unique Pages: ")
-        for i in range(len(subdomain_freqs.items())):
-            report.write(f"{subdomain_freqs.values(i)}, {subdomain_freqs.keys(i)}\n")
 
-def robot_check(url): 
-    try:   
-        parsed = urlparse(url)
-    except Exception:
-        return False
-    robots_link = f'{parsed.scheme}://{parsed.netloc}/robots.txt'
-    if robots_link not in robot_parse_links:
-        sleep(0.5) #politeness
-        try:
-            rp = RobotFileParser()
-            rp.set_url(robots_link)
-            rp.read()
-            robot_parse_links[robots_link] = rp
-        except Exception:
-            return False
+        report.write(f"Subdomain Frequencies:\n")
+        for subdomain in sorted(subdomain_freqs):
+            report.write(f"{subdomain}, {subdomain_freqs[subdomain]}\n")
 
-    return robot_parse_links[robots_link].can_fetch("*", url)
+# def robot_check(url): 
+#     try:   
+#         parsed = urlparse(url)
+#     except Exception:
+#         return False
+#     robots_link = f'{parsed.scheme}://{parsed.netloc}/robots.txt'
+#     if robots_link not in robot_parse_links:
+#         sleep(0.5) #politeness
+#         try:
+#             rp = RobotFileParser()
+#             rp.set_url(robots_link)
+#             rp.read()
+#             robot_parse_links[robots_link] = rp
+#         except Exception:
+#             return False
+
+#     return robot_parse_links[robots_link].can_fetch("*", url)
     
 def is_valid(url):
     # Decide whether to crawl this url or not. 
     # If you decide to crawl it, return True; otherwise return False.
     # There are already some conditions that return False.
+    if url in visited_urls or url in blacklist_urls:
+        return False
     try:
         parsed = urlparse(url)
 
         if parsed.scheme not in set(["http", "https"]):
             return False
         
+        
         netloc = parsed.netloc
         path = parsed.path
-        failed_conditions = 0
+        query = parsed.query
 
-        if '.ics.uci.edu' not in netloc:
-            failed_conditions += 1
-        if '.cs.uci.edu' not in netloc:
-            failed_conditions += 1
-        if '.informations.uci.edu' not in netloc:
-            failed_conditions += 1
-        if '.stat.uci.edu' not in netloc:
-            failed_conditions += 1
+        #data files often come from this path, very large downloads with no value
+        if "/supplement/" in path.lower():
+            return False
         
-        if failed_conditions == 4:
+        #from wiki.ics.uci.edu/doku.php/projects...?do= leading to crawler trap
+        if "do=" in query:
+            return False
+
+
+        #from multiple runs -> lots of calendar traps & event traps
+        trap_patterns = [
+            r'/events?/.*\d{4}-\d{2}-\d{2}',
+            r'/events?/.*\d{4}-\d{2}(?:/|$)',      
+            r'/events?/.*\d{4}/\d{2}/\d{2}',
+            r'/events?/.*\d{4}/\d{2}(?:/|$)',
+            r'/calendar/',
+            r'eventDate',
+            r'tribe-bar-date',
+            r'ical'
+        ]
+        
+        full_url = f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
+        if any(re.search(pattern, full_url) for pattern in trap_patterns):
+            return False
+
+        allowed_domains = (
+            '.ics.uci.edu',
+            '.cs.uci.edu',
+            '.informatics.uci.edu',
+            '.stat.uci.edu'
+        )
+
+        if not any(domain in netloc for domain in allowed_domains):
             return False
 
         ##ban common url traps with regex -> calendar traps, repeating directory traps
@@ -237,7 +309,7 @@ def is_valid(url):
 
         if re.match(r"^.*calendar.*$", path):
             return False
-        if re.match(r" ^.*?(/.+?/).*?\1.*$|^.*?/(.+?/)\2.*$", path):
+        if re.match(r"^.*?(/.+?/).*?\1.*$|^.*?/(.+?/)\2.*$", path):
             return False
         
         return not re.match(
@@ -246,8 +318,10 @@ def is_valid(url):
             + r"|wav|avi|mov|mpeg|ram|m4v|mkv|ogg|ogv|pdf"
             + r"|ps|eps|tex|ppt|pptx|doc|docx|xls|xlsx|names"
             + r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
-            + r"|epub|dll|cnf|tgz|sha1|txt"
+            + r"|epub|dll|cnf|tgz|sha1"
             + r"|thmx|mso|arff|rtf|jar|csv"
+            #some common file types that can't be properly scraped/crawled
+            + r"img|sql|odc|txt|war|apk|mpg|scm|ps\.z|rss|c|tex\.z|bib\.z|pps|bib|ppsx|ff|ma"
             + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", parsed.path.lower())
     except TypeError:
         print ("TypeError for ", parsed)
